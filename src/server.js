@@ -18,7 +18,20 @@ import paymentRoutes from "./routes/payment.route.js";
 
 const app = express();
 
-// Middleware
+const __dirname = path.resolve();
+
+// ========== MIDDLEWARE DE REDIRECTION ==========
+// Redirige toutes les requêtes /admin/* vers /api/admin/*
+app.use((req, res, next) => {
+  if (req.path.startsWith("/admin") && !req.path.startsWith("/api/admin")) {
+    const newUrl = `/api${req.path}`;
+    console.log(`Redirecting ${req.method} ${req.path} to ${newUrl}`);
+    return res.redirect(308, newUrl); // 308 Permanent Redirect
+  }
+  next();
+});
+
+// special handling: Stripe webhook needs raw body BEFORE any body parsing middleware
 app.use(
   "/api/payment",
   (req, res, next) => {
@@ -35,8 +48,8 @@ app.use(express.json());
 app.use(clerkMiddleware());
 app.use(cors({ origin: ENV.CLIENT_URL, credentials: true }));
 
-// Routes API
 app.use("/api/inngest", serve({ client: inngest, functions }));
+
 app.use("/api/admin", adminRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/orders", orderRoutes);
@@ -44,12 +57,30 @@ app.use("/api/reviews", reviewRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/cart", cartRoutes);
 
-// Route de santé
 app.get("/api/health", (req, res) => {
   res.status(200).json({ message: "Success" });
 });
 
-// ⚠️ IMPORTANT : Pour Vercel, NE PAS écouter sur un port spécifique
-// Vercel gère cela automatiquement
+// SUPPRIMEZ le bloc de production si vous avez un frontend séparé
+// if (ENV.NODE_ENV === "production") {
+//   app.use(express.static(path.join(__dirname, "../admin/dist")));
+//   
+//   app.get("*", (req, res) => {
+//     if (req.path.startsWith("/api/")) {
+//       return res.status(404).json({ error: "API endpoint not found" });
+//     }
+//     res.sendFile(path.join(__dirname, "../admin", "dist", "index.html"));
+//   });
+// }
+
+const startServer = async () => {
+  await connectDB();
+  const port = process.env.PORT || ENV.PORT || 5000;
+  app.listen(port, () => {
+    console.log(`Server is up and running on port ${port}`);
+  });
+};
+
+startServer();
 
 export default app;
