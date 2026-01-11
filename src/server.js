@@ -5,6 +5,7 @@ import { serve } from "inngest/express";
 import cors from "cors";
 
 import { functions, inngest } from "./config/inngest.js";
+
 import { ENV } from "./config/env.js";
 import { connectDB } from "./config/db.js";
 
@@ -18,63 +19,28 @@ import paymentRoutes from "./routes/payment.route.js";
 
 const app = express();
 
-// ========== CORS ==========
-app.use(cors({
-  origin: [
-    'https://e-commerce-admin-six-vert.vercel.app',
-    'http://localhost:3000',
-    'http://localhost:5173'
-  ],
-  credentials: true
-}));
+const __dirname = path.resolve();
 
-// ========== RÉÉCRITURE D'URL TRANSPARENTE ==========
-// Cette fonction réécrit l'URL sans redirection
-const rewriteAdminUrls = (req, res, next) => {
-  // Si la requête commence par /admin/ mais pas par /api/admin/
-  if (req.path.startsWith('/admin/') && !req.path.startsWith('/api/admin/')) {
-    // Sauvegarder l'URL originale
-    const originalUrl = req.originalUrl;
-    const originalPath = req.path;
-    
-    // Construire la nouvelle URL
-    const newPath = `/api${originalPath}`;
-    
-    console.log(`🔄 Réécriture transparente: ${req.method} ${originalUrl} -> ${newPath}`);
-    
-    // Modifier la requête pour Express
-    req.url = newPath;
-    req.originalRewrite = originalUrl;
-    
-    // Appeler next() immédiatement pour traiter la nouvelle URL
-    return app._router.handle(req, res, next);
-  }
-  
-  next();
-};
-
-// Appliquer le middleware de réécriture
-app.use(rewriteAdminUrls);
-
-// ========== MIDDLEWARE ==========
-app.use(express.json());
-app.use(clerkMiddleware());
-
-// ========== STRIPE WEBHOOK ==========
+// special handling: Stripe webhook needs raw body BEFORE any body parsing middleware
+// apply raw body parser conditionally only to webhook endpoint
 app.use(
   "/api/payment",
   (req, res, next) => {
     if (req.originalUrl === "/api/payment/webhook") {
       express.raw({ type: "application/json" })(req, res, next);
     } else {
-      express.json()(req, res, next);
+      express.json()(req, res, next); // parse json for non-webhook routes
     }
   },
   paymentRoutes
 );
 
-// ========== ROUTES API ==========
+app.use(express.json());
+app.use(clerkMiddleware()); // adds auth object under the req => req.auth
+app.use(cors({ origin: ENV.CLIENT_URL, credentials: true })); // credentials: true allows the browser to send the cookies to the server with the request
+
 app.use("/api/inngest", serve({ client: inngest, functions }));
+
 app.use("/api/admin", adminRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/orders", orderRoutes);
@@ -82,80 +48,29 @@ app.use("/api/reviews", reviewRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/cart", cartRoutes);
 
-// ========== ROUTES DIRECTES (optionnel) ==========
-// Si tu veux que /admin/* fonctionne SANS redirection
-app.use("/admin", adminRoutes); // Cette ligne rend /admin/products accessible directement
-
-// ========== HEALTH CHECK ==========
 app.get("/api/health", (req, res) => {
-  res.status(200).json({ 
-    message: "Success",
-    timestamp: new Date().toISOString(),
-    routes: {
-      direct_api: "/api/admin/*",
-      direct_admin: "/admin/*",
-      test_urls: {
-        with_api: "https://backend-expo.vercel.app/api/admin/products",
-        without_api: "https://backend-expo.vercel.app/admin/products"
-      }
+  res.status(200).json({ message: "Success" });
+});
+
+// make our app ready for deployment
+if (ENV.NODE_ENV === "production") {
+  app.use(express.static(path.join(__dirname, "../admin/dist")));
+
+    app.get("*", (req, res) => {
+    // Si la route commence par /api, renvoyer 404
+    if (req.path.startsWith("/api/")) {
+      return res.status(404).json({ error: "API endpoint not found" });
     }
+    // Sinon, servir le frontend
+    res.sendFile(path.join(__dirname, "../admin", "dist", "index.html"));
   });
-});
+}
 
-app.get("/", (req, res) => {
-  res.json({
-    message: "Welcome to E-commerce API",
-    note: "Frontend can use either:",
-    options: [
-      "OPTION 1: /api/admin/products (recommended)",
-      "OPTION 2: /admin/products (works directly)"
-    ],
-    test: "Try both URLs in your browser!"
-  });
-});
-
-// ========== 404 HANDLER ==========
-app.use((req, res) => {
-  res.status(404).json({ 
-    error: "Not Found",
-    requested: req.originalUrl,
-    available_routes: [
-      "GET /api/health",
-      "GET /api/admin/products",
-      "GET /admin/products",
-      "GET /api/products",
-      "POST /api/admin/products"
-    ]
-  });
-});
-
-// ========== START SERVER ==========
 const startServer = async () => {
   await connectDB();
-  const port = process.env.PORT || ENV.PORT || 5000;
-  app.listen(port, () => {
-    console.log(`
-=======================================
-🚀 SERVER STARTED ON PORT ${port}
-=======================================
-✅ BOTH URLs WILL WORK:
-   1. https://backend-expo.vercel.app/api/admin/products
-   2. https://backend-expo.vercel.app/admin/products
-   
-✅ CORS ENABLED FOR:
-   • https://e-commerce-admin-six-vert.vercel.app
-   • http://localhost:3000
-   
-=======================================
-🔗 TEST LINKS:
-   • Health: https://backend-expo.vercel.app/api/health
-   • Admin Products (API): https://backend-expo.vercel.app/api/admin/products
-   • Admin Products (Direct): https://backend-expo.vercel.app/admin/products
-=======================================
-    `);
+  app.listen(ENV.PORT, () => {
+    console.log("Server is up and running");
   });
 };
 
 startServer();
-
-export default app;
