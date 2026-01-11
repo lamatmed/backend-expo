@@ -19,22 +19,49 @@ import paymentRoutes from "./routes/payment.route.js";
 const app = express();
 const __dirname = path.resolve();
 
-// Middleware de logging
-app.use((req, res, next) => {
-  console.log(`${req.method} ${req.url}`);
-  next();
-});
+// Configuration CORS avec CLIENT_URL
+const allowedOrigins = [
+  ENV.CLIENT_URL, // https://e-commerce-admin-six-vert.vercel.app
+  'http://localhost:5173', // pour le développement local
+  'http://localhost:3000',
+];
 
 // Configuration CORS
 app.use(cors({
-  origin: ENV.CLIENT_URL || "https://e-commerce-admin-six-vert.vercel.app",
-  credentials: true
+  origin: function (origin, callback) {
+    // Permettre les requêtes sans origine (comme les apps mobiles, curl, Postman)
+    if (!origin) return callback(null, true);
+    
+    // Vérifier si l'origine est dans la liste autorisée
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.log(`CORS bloqué pour l'origine: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
-// Middleware pour parser le JSON
-app.use(express.json());
+// Gestion des requêtes OPTIONS (preflight)
+app.options('*', cors());
 
-// Middleware Clerk
+// special handling: Stripe webhook needs raw body BEFORE any body parsing middleware
+app.use(
+  "/api/payment",
+  (req, res, next) => {
+    if (req.originalUrl === "/api/payment/webhook") {
+      express.raw({ type: "application/json" })(req, res, next);
+    } else {
+      express.json()(req, res, next);
+    }
+  },
+  paymentRoutes
+);
+
+app.use(express.json());
 app.use(clerkMiddleware());
 
 // Routes API
@@ -46,56 +73,50 @@ app.use("/api/reviews", reviewRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/cart", cartRoutes);
 
-// Route de santé
 app.get("/api/health", (req, res) => {
-  res.json({ 
-    status: "OK",
-    timestamp: new Date().toISOString(),
-    nodeVersion: process.version
-  });
+  res.status(200).json({ message: "Success" });
 });
 
-// Route racine
 app.get("/", (req, res) => {
   res.json({
     status: "Backend is running 🚀",
-    environment: ENV.NODE_ENV,
-    clientUrl: ENV.CLIENT_URL
+    clientUrl: ENV.CLIENT_URL,
+    corsEnabled: true
   });
 });
 
-// Gestion des erreurs
+// Middleware de logging pour déboguer CORS
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} - Origin: ${req.headers.origin}`);
+  next();
+});
+
+// Gestion des erreurs CORS
 app.use((err, req, res, next) => {
-  console.error("Error:", err);
-  res.status(500).json({
-    error: "Internal Server Error",
-    message: err.message
-  });
+  if (err.message === 'Not allowed by CORS') {
+    console.log(`CORS Error: ${req.headers.origin} not allowed`);
+    return res.status(403).json({ 
+      error: 'CORS error', 
+      message: 'Origin not allowed',
+      allowedOrigins: allowedOrigins,
+      yourOrigin: req.headers.origin
+    });
+  }
+  next(err);
 });
 
-// Route 404 pour API
+// Gestion des routes API non trouvées
 app.use("/api/*", (req, res) => {
   res.status(404).json({ error: "API endpoint not found" });
 });
 
-// Démarrage du serveur
 const startServer = async () => {
-  try {
-    console.log("Connecting to database...");
-    await connectDB();
-    console.log("Database connected successfully");
-    
-    app.listen(ENV.PORT || 3000, () => {
-      console.log(`Server running on port ${ENV.PORT || 3000}`);
-      console.log(`CORS enabled for: ${ENV.CLIENT_URL}`);
-    });
-  } catch (error) {
-    console.error("Failed to start server:", error);
-    process.exit(1);
-  }
+  await connectDB();
+  app.listen(ENV.PORT, () => {
+    console.log("Server is up and running");
+    console.log(`CORS configured for: ${ENV.CLIENT_URL}`);
+    console.log(`Allowed origins: ${allowedOrigins.join(', ')}`);
+  });
 };
 
 startServer();
-
-// Export pour Vercel (si nécessaire)
-export default app;
