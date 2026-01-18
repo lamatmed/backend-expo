@@ -20,65 +20,23 @@ const app = express();
 
 const __dirname = path.resolve();
 
-// 1. Middleware CORS
-app.use(cors({ 
-  origin: ENV.CLIENT_URL || "*", 
-  credentials: true 
-}));
-
-// 2. Middleware JSON AVEC vérification intelligente
-app.use((req, res, next) => {
-  // Ne parser JSON que pour les méthodes qui peuvent avoir un body
-  const methodsWithBody = ['POST', 'PUT', 'PATCH', 'DELETE'];
-  
-  if (methodsWithBody.includes(req.method) && 
-      req.headers['content-type'] === 'application/json') {
-    
-    // Vérifier si le body est vide
-    let data = '';
-    req.on('data', chunk => {
-      data += chunk;
-    });
-    
-    req.on('end', () => {
-      if (data && data.trim() !== '') {
-        try {
-          req.body = JSON.parse(data);
-          next();
-        } catch (error) {
-          console.error('JSON parsing error:', error.message);
-          return res.status(400).json({ 
-            error: 'Invalid JSON format',
-            message: 'Please provide valid JSON'
-          });
-        }
-      } else {
-        // Body vide mais c'est OK
-        req.body = {};
-        next();
+// Middleware de base
+app.use(cors({ origin: ENV.CLIENT_URL, credentials: true }));
+app.use(express.json({ 
+  limit: '10mb',
+  verify: (req, res, buf, encoding) => {
+    try {
+      if (buf && buf.length > 0) {
+        JSON.parse(buf.toString());
       }
-    });
-  } else {
-    // Pour GET, HEAD, OPTIONS - pas de body parsing
-    next();
+    } catch (e) {
+      console.log('JSON parsing check failed, might be webhook or empty body');
+    }
   }
-});
-
-// 3. Clerk middleware
+}));
 app.use(clerkMiddleware());
-// Route test ADMIN simple
-app.get("/api/admin/simple-test", (req, res) => {
-  console.log("Route /api/admin/simple-test appelée");
-  res.json({ 
-    success: true,
-    message: "Route admin fonctionne",
-    data: [
-      { id: 1, name: "Test Product 1", price: 99.99 },
-      { id: 2, name: "Test Product 2", price: 149.99 }
-    ]
-  });
-});
-// 4. Routes
+
+// Routes standard
 app.use("/api/inngest", serve({ client: inngest, functions }));
 app.use("/api/admin", adminRoutes);
 app.use("/api/users", userRoutes);
@@ -87,90 +45,49 @@ app.use("/api/reviews", reviewRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/cart", cartRoutes);
 
-// 5. Routes Payment avec gestion spéciale pour webhook
-const handlePaymentRoutes = (req, res, next) => {
-  if (req.originalUrl === "/api/payment/webhook" && req.method === "POST") {
-    // Pour le webhook Stripe seulement
-    return express.raw({ type: "application/json" })(req, res, next);
+// Route spéciale pour Stripe Webhook (SÉPARÉE)
+app.post(
+  "/api/payment/webhook",
+  express.raw({ type: "application/json" }),
+  (req, res, next) => {
+    // Ici, req.body est un Buffer (raw)
+    // Trouvez le router payment et appelez-le manuellement
+    // Ou déplacez la logique webhook ici
+    const stripeController = require("./controllers/payment.controller.js");
+    stripeController.handleWebhook(req, res, next);
   }
-  next();
-};
+);
 
-app.use("/api/payment", handlePaymentRoutes, paymentRoutes);
+// Routes payment normales
+app.use("/api/payment", paymentRoutes);
 
-// 6. Routes de santé
+// Routes santé
 app.get("/api/health", (req, res) => {
-  res.status(200).json({ 
-    status: "healthy",
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || "development"
-  });
+  res.status(200).json({ message: "Success" });
 });
 
 app.get("/", (req, res) => {
-  res.send(`
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <title>API E-Commerce</title>
-  </head>
-  <body>
-    <h1>API E-Commerce</h1>
-    <p>Server is running on port ${ENV.PORT}</p>
-    <p><a href="/api/health">Health Check</a></p>
-    <p><a href="/api/admin/products">Admin Products</a></p>
-  </body>
-  </html>
-  `);
+  res.send("API is running");
 });
 
-// 7. Middleware de logging (optionnel mais utile)
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
-  next();
-});
-
-// 8. Gestion d'erreurs améliorée
+// Gestion d'erreurs
 app.use((err, req, res, next) => {
-  console.error('Global error handler:', err);
-  
+  console.error('Server error:', err);
   if (err.type === 'entity.parse.failed') {
-    return res.status(400).json({
-      error: 'Bad Request',
-      message: 'Invalid JSON in request body',
-      details: 'Ensure you are sending valid JSON or no body for GET requests'
+    return res.status(400).json({ 
+      error: 'Invalid JSON',
+      message: 'The request body contains invalid JSON'
     });
   }
-  
-  res.status(err.status || 500).json({
-    error: err.message || 'Internal Server Error',
-    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
-  });
-});
-
-// 9. Route 404
-app.use((req, res) => {
-  res.status(404).json({
-    error: 'Not Found',
-    message: `Route ${req.method} ${req.url} not found`
-  });
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 const startServer = async () => {
-  try {
-    await connectDB();
+  await connectDB();
+  app.listen(ENV.PORT, () => {
     console.log(`✅ Connected to MONGODB`);
-    
-    app.listen(ENV.PORT, () => {
-      console.log(`🚀 Server is up and running on port ${ENV.PORT}`);
-      console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`🔗 Health check: http://localhost:${ENV.PORT}/api/health`);
-      console.log(`🛍️  Admin products: http://localhost:${ENV.PORT}/api/admin/products`);
-    });
-  } catch (error) {
-    console.error('❌ Failed to start server:', error);
-    process.exit(1);
-  }
+    console.log("Server is up and running");
+  });
 };
 
 startServer();
