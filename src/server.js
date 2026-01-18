@@ -66,7 +66,18 @@ app.use((req, res, next) => {
 
 // 3. Clerk middleware
 app.use(clerkMiddleware());
-
+// Route test ADMIN simple
+app.get("/api/admin/simple-test", (req, res) => {
+  console.log("Route /api/admin/simple-test appelée");
+  res.json({ 
+    success: true,
+    message: "Route admin fonctionne",
+    data: [
+      { id: 1, name: "Test Product 1", price: 99.99 },
+      { id: 2, name: "Test Product 2", price: 149.99 }
+    ]
+  });
+});
 // 4. Routes
 app.use("/api/inngest", serve({ client: inngest, functions }));
 app.use("/api/admin", adminRoutes);
