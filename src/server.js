@@ -5,7 +5,6 @@ import { serve } from "inngest/express";
 import cors from "cors";
 
 import { functions, inngest } from "./config/inngest.js";
-
 import { ENV } from "./config/env.js";
 import { connectDB } from "./config/db.js";
 
@@ -21,26 +20,55 @@ const app = express();
 
 const __dirname = path.resolve();
 
-// special handling: Stripe webhook needs raw body BEFORE any body parsing middleware
-// apply raw body parser conditionally only to webhook endpoint
-app.use(
-  "/api/payment",
-  (req, res, next) => {
-    if (req.originalUrl === "/api/payment/webhook") {
-      express.raw({ type: "application/json" })(req, res, next);
-    } else {
-      express.json()(req, res, next); // parse json for non-webhook routes
-    }
-  },
-  paymentRoutes
-);
+// 1. Middleware CORS
+app.use(cors({ 
+  origin: ENV.CLIENT_URL || "*", 
+  credentials: true 
+}));
 
-app.use(express.json());
-app.use(clerkMiddleware()); // adds auth object under the req => req.auth
-app.use(cors({ origin: ENV.CLIENT_URL, credentials: true })); // credentials: true allows the browser to send the cookies to the server with the request
+// 2. Middleware JSON AVEC vérification intelligente
+app.use((req, res, next) => {
+  // Ne parser JSON que pour les méthodes qui peuvent avoir un body
+  const methodsWithBody = ['POST', 'PUT', 'PATCH', 'DELETE'];
+  
+  if (methodsWithBody.includes(req.method) && 
+      req.headers['content-type'] === 'application/json') {
+    
+    // Vérifier si le body est vide
+    let data = '';
+    req.on('data', chunk => {
+      data += chunk;
+    });
+    
+    req.on('end', () => {
+      if (data && data.trim() !== '') {
+        try {
+          req.body = JSON.parse(data);
+          next();
+        } catch (error) {
+          console.error('JSON parsing error:', error.message);
+          return res.status(400).json({ 
+            error: 'Invalid JSON format',
+            message: 'Please provide valid JSON'
+          });
+        }
+      } else {
+        // Body vide mais c'est OK
+        req.body = {};
+        next();
+      }
+    });
+  } else {
+    // Pour GET, HEAD, OPTIONS - pas de body parsing
+    next();
+  }
+});
 
+// 3. Clerk middleware
+app.use(clerkMiddleware());
+
+// 4. Routes
 app.use("/api/inngest", serve({ client: inngest, functions }));
-
 app.use("/api/admin", adminRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/orders", orderRoutes);
@@ -48,8 +76,24 @@ app.use("/api/reviews", reviewRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/cart", cartRoutes);
 
+// 5. Routes Payment avec gestion spéciale pour webhook
+const handlePaymentRoutes = (req, res, next) => {
+  if (req.originalUrl === "/api/payment/webhook" && req.method === "POST") {
+    // Pour le webhook Stripe seulement
+    return express.raw({ type: "application/json" })(req, res, next);
+  }
+  next();
+};
+
+app.use("/api/payment", handlePaymentRoutes, paymentRoutes);
+
+// 6. Routes de santé
 app.get("/api/health", (req, res) => {
-  res.status(200).json({ message: "Success" });
+  res.status(200).json({ 
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || "development"
+  });
 });
 
 app.get("/", (req, res) => {
@@ -58,45 +102,64 @@ app.get("/", (req, res) => {
   <html>
   <head>
     <title>API E-Commerce</title>
-    <style>
-      body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f0f2f5; }
-      .container { max-width: 800px; margin: auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-      h1 { color: #333; border-bottom: 3px solid #4CAF50; padding-bottom: 10px; }
-      .endpoint { background: #f8f9fa; margin: 10px 0; padding: 15px; border-left: 4px solid #4CAF50; border-radius: 5px; }
-      .method { font-weight: bold; color: white; padding: 3px 8px; border-radius: 3px; margin-right: 10px; }
-      .GET { background: #2196F3; }
-      .POST { background: #4CAF50; }
-      .PUT { background: #FF9800; }
-      .DELETE { background: #f44336; }
-      .status { background: #4CAF50; color: white; padding: 5px 10px; border-radius: 5px; display: inline-block; margin: 10px 0; }
-    </style>
   </head>
   <body>
-    <div class="container">
-      <h1>🛒 API E-Commerce</h1>
-      <div class="status">✅ Serveur actif - Port ${ENV.PORT}</div>
-      
-      <h3>Endpoints disponibles :</h3>
-      <div class="endpoint"><span class="method GET">GET</span> /api/health - Vérifier l'état</div>
-      <div class="endpoint"><span class="method GET">GET</span> /api/products - Produits</div>
-      <div class="endpoint"><span class="method POST">POST</span> /api/auth/login - Connexion</div>
-      <div class="endpoint"><span class="method GET">GET</span> /api/cart - Panier</div>
-      <div class="endpoint"><span class="method POST">POST</span> /api/orders - Commandes</div>
-      
-      <p><strong>Client :</strong> ${ENV.CLIENT_URL || 'Non défini'}</p>
-      <p><strong>Environnement :</strong> ${process.env.NODE_ENV || 'development'}</p>
-    </div>
+    <h1>API E-Commerce</h1>
+    <p>Server is running on port ${ENV.PORT}</p>
+    <p><a href="/api/health">Health Check</a></p>
+    <p><a href="/api/admin/products">Admin Products</a></p>
   </body>
   </html>
   `);
 });
 
+// 7. Middleware de logging (optionnel mais utile)
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
+  next();
+});
+
+// 8. Gestion d'erreurs améliorée
+app.use((err, req, res, next) => {
+  console.error('Global error handler:', err);
+  
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({
+      error: 'Bad Request',
+      message: 'Invalid JSON in request body',
+      details: 'Ensure you are sending valid JSON or no body for GET requests'
+    });
+  }
+  
+  res.status(err.status || 500).json({
+    error: err.message || 'Internal Server Error',
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+  });
+});
+
+// 9. Route 404
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    message: `Route ${req.method} ${req.url} not found`
+  });
+});
 
 const startServer = async () => {
-  await connectDB();
-  app.listen(ENV.PORT, () => {
-    console.log("Server is up and running");
-  });
+  try {
+    await connectDB();
+    console.log(`✅ Connected to MONGODB`);
+    
+    app.listen(ENV.PORT, () => {
+      console.log(`🚀 Server is up and running on port ${ENV.PORT}`);
+      console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`🔗 Health check: http://localhost:${ENV.PORT}/api/health`);
+      console.log(`🛍️  Admin products: http://localhost:${ENV.PORT}/api/admin/products`);
+    });
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
+  }
 };
 
 startServer();
