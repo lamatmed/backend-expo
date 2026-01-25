@@ -7,6 +7,10 @@ export const connectDB = async () => {
     console.log(`✅ Connected to MONGODB: ${conn.connection.host}`);
   } catch (error) {
     console.error("💥 MONGODB connection error");
-    process.exit(1); // exit code 1 means failure, 0 means success
+    if (process.env.NODE_ENV === "production") {
+      throw error;
+    } else {
+      process.exit(1);
+    }
   }
 };
